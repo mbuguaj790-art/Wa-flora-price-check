@@ -1,292 +1,225 @@
-# app.py
-import sqlite3
-from flask import Flask, request, redirect, url_for, render_template_string, session, flash
+from flask import Flask, render_template_string, request, redirect, url_for, flash, session
 from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
 
 app = Flask(__name__)
-app.secret_key = "change_this_super_secret_key"  # change for production
-DB_NAME = "wa_flora_simple.db"
+app.secret_key = "supersecretkey"
+
+DB_FILE = "app.db"
+
+# ----------------------
+# Database helpers
+# ----------------------
+def query_db(query, args=(), fetch=False, commit=False):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute(query, args)
+    if commit:
+        conn.commit()
+        conn.close()
+        return
+    rows = cur.fetchall()
+    conn.close()
+    if fetch:
+        return rows
+    return None
 
 # ----------------------
 # Initialize DB
 # ----------------------
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
-        c = conn.cursor()
-        # products
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                packing TEXT,
-                retail_price REAL DEFAULT 0,
-                wholesale_price REAL DEFAULT 0,
-                barcode TEXT
-            )
-        """)
-        # users (workers)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'worker'
-            )
-        """)
-        conn.commit()
-init_db()
+    query_db("""CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        packing TEXT,
+        retail_price REAL DEFAULT 0,
+        wholesale_price REAL DEFAULT 0,
+        barcode TEXT
+    )""", commit=True)
+    query_db("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL
+    )""", commit=True)
+    # Add default admin if not exists
+    row = query_db("SELECT * FROM users WHERE username='Waflora'", fetch=True)
+    if not row:
+        query_db("INSERT INTO users (username,password,role) VALUES (?,?,?)",
+                 ("Waflora", generate_password_hash("0725935410"), "admin"), commit=True)
 
 # ----------------------
 # Templates
 # ----------------------
 BASE_CSS = """
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-body { padding-bottom: 40px; }
+body { font-family: Arial; margin: 20px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+th { cursor: pointer; background-color: #f2f2f2; }
+input { padding: 5px; margin: 5px; }
+button { padding: 5px 10px; margin: 5px; }
+.navbar { margin-bottom: 15px; }
+.navbar a { margin-right: 10px; text-decoration: none; }
 </style>
 """
 
 NAVBAR_HTML = """
-<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('index') }}">Wa Flora</a>
-    <div class="collapse navbar-collapse">
-      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-        {% if session.get('role') == 'admin' %}
-          <li class="nav-item"><a class="nav-link" href="{{ url_for('manage_products') }}">Manage Products</a></li>
-          <li class="nav-item"><a class="nav-link" href="{{ url_for('manage_workers') }}">Manage Workers</a></li>
-        {% endif %}
-      </ul>
-      <div class="d-flex">
-        {% if session.get('username') %}
-          <span class="navbar-text text-white me-3">{{ session.get('username') }} ({{ session.get('role') }})</span>
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('logout') }}">Logout</a>
-        {% else %}
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('login') }}">Login</a>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</nav>
+<div class='navbar'>
+{% if session.get('role')=='admin' %}
+<a href='/manage_products'>Products</a>
+<a href='/manage_workers'>Workers</a>
+{% elif session.get('role')=='worker' %}
+<a href='/'>Products</a>
+{% endif %}
+<a href='/logout'>Logout</a>
+</div>
 """
 
-LOGIN_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Login - Wa Flora</title>
-  {{ base_css|safe }}
-</head>
-<body class="container py-5">
-  <div class="row justify-content-center">
-    <div class="col-md-6">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <h4 class="card-title mb-3">Login</h4>
-          {% with messages = get_flashed_messages() %}
-            {% if messages %}<div class="alert alert-danger">{{ messages[0] }}</div>{% endif %}
-          {% endwith %}
-          <form method="post">
-            <div class="mb-3"><input class="form-control" name="username" placeholder="Username" required></div>
-            <div class="mb-3"><input type="password" class="form-control" name="password" placeholder="Password" required></div>
-            <div class="d-grid"><button class="btn btn-primary">Login</button></div>
-          </form>
-        </div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
+LOGIN_TEMPLATE = BASE_CSS + """
+<h2 style='text-align:center;'>Login</h2>
+<form method='POST' style='text-align:center;'>
+<input type='text' name='username' placeholder='Username' required>
+<input type='password' name='password' placeholder='Password' required>
+<button type='submit'>Login</button>
+</form>
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<ul>
+{% for m in messages %}<li>{{m}}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endwith %}
 """
 
-INDEX_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Products - Wa Flora</title>
-  {{ base_css|safe }}
-</head>
-<body>
-  {{ navbar|safe }}
-  <div class="container">
-    <h3 class="mb-3">Products</h3>
-    <table class="table table-striped">
-      <thead><tr><th>ID</th><th>Name</th><th>Packing</th><th>Retail</th><th>Wholesale</th><th>Barcode</th></tr></thead>
-      <tbody>
-        {% for p in products %}
-        <tr>
-          <td>{{ p[0] }}</td>
-          <td>{{ p[1] }}</td>
-          <td>{{ p[2] or '' }}</td>
-          <td>{{ "%.2f"|format(p[3] or 0) }}</td>
-          <td>{{ "%.2f"|format(p[4] or 0) }}</td>
-          <td>{{ p[5] or '' }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</body>
-</html>
+INDEX_TEMPLATE = BASE_CSS + NAVBAR_HTML + """
+<h2 style='text-align:center;'>Products</h2>
+<input type='text' id='search' placeholder='Search products'>
+<table id='productTable'>
+<thead>
+<tr>
+<th>Name</th><th>Packing</th><th>Retail</th><th>Wholesale</th><th>Barcode</th>
+</tr>
+</thead>
+<tbody>
+{% for p in products %}
+<tr>
+<td>{{p[1]}}</td>
+<td>{{p[2]}}</td>
+<td>{{p[3]}}</td>
+<td>{{p[4]}}</td>
+<td>{{p[5]}}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+document.getElementById('search').addEventListener('keyup', function(){
+    let filter = this.value.toLowerCase();
+    let rows = document.querySelectorAll('#productTable tbody tr');
+    rows.forEach(row => {
+        let text = row.innerText.toLowerCase();
+        row.style.display = text.includes(filter) ? '' : 'none';
+    });
+});
+</script>
 """
 
-MANAGE_PRODUCTS_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Manage Products</title>
-  {{ base_css|safe }}
-</head>
-<body>
-  {{ navbar|safe }}
-  <div class="container">
-    <h3>Manage Products</h3>
-    <div class="card mb-3">
-      <div class="card-body">
-        <form method="post" action="{{ url_for('add_product') }}">
-          <div class="row g-2">
-            <div class="col-md-3"><input class="form-control" name="name" placeholder="Name" required></div>
-            <div class="col-md-2"><input class="form-control" name="packing" placeholder="Packing"></div>
-            <div class="col-md-2"><input class="form-control" name="retail" placeholder="Retail" type="number" step="0.01"></div>
-            <div class="col-md-2"><input class="form-control" name="wholesale" placeholder="Wholesale" type="number" step="0.01"></div>
-            <div class="col-md-3"><input class="form-control" name="barcode" placeholder="Barcode"></div>
-          </div>
-          <div class="mt-2"><button class="btn btn-success">Add Product</button></div>
-        </form>
-      </div>
-    </div>
+MANAGE_PRODUCTS_TEMPLATE = BASE_CSS + NAVBAR_HTML + """
+<h2 style='text-align:center;'>Manage Products</h2>
+<div style='text-align:center; margin-bottom: 10px;'>
+<form method='POST' action='/add_product'>
+<input type='text' name='name' placeholder='Product Name' required>
+<input type='text' name='packing' placeholder='Packing'>
+<input type='number' step='any' name='retail' placeholder='Retail Price'>
+<input type='number' step='any' name='wholesale' placeholder='Wholesale Price'>
+<input type='text' name='barcode' placeholder='Barcode'>
+<button type='submit'>Add Product</button>
+</form>
+</div>
 
-    <div class="card">
-      <div class="card-body">
-        <h5>Existing Products</h5>
-        <table class="table table-sm">
-          <thead><tr><th>ID</th><th>Name</th><th>Actions</th></tr></thead>
-          <tbody>
-            {% for p in products %}
-            <tr>
-              <td>{{ p[0] }}</td>
-              <td>{{ p[1] }}</td>
-              <td>
-                <a class="btn btn-sm btn-warning" href="{{ url_for('edit_product', pid=p[0]) }}">Edit</a>
-                <a class="btn btn-sm btn-danger" href="{{ url_for('delete_product', pid=p[0]) }}" onclick="return confirm('Delete product?')">Delete</a>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
+<input type='text' id='search' placeholder='Search products'>
+<table id='productTable'>
+<thead>
+<tr>
+<th>Name</th><th>Packing</th><th>Retail</th><th>Wholesale</th><th>Barcode</th><th>Actions</th>
+</tr>
+</thead>
+<tbody>
+{% for p in products %}
+<tr>
+<td>{{p[1]}}</td><td>{{p[2]}}</td><td>{{p[3]}}</td><td>{{p[4]}}</td><td>{{p[5]}}</td>
+<td>
+<a href='/edit_product/{{p[0]}}'>Edit</a> |
+<a href='/delete_product/{{p[0]}}'>Delete</a>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<script>
+document.getElementById('search').addEventListener('keyup', function(){
+    let filter = this.value.toLowerCase();
+    let rows = document.querySelectorAll('#productTable tbody tr');
+    rows.forEach(row => {
+        let text = row.innerText.toLowerCase();
+        row.style.display = text.includes(filter) ? '' : 'none';
+    });
+});
+</script>
 """
 
-EDIT_PRODUCT_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Edit Product</title>
-  {{ base_css|safe }}
-</head>
-<body>
-  {{ navbar|safe }}
-  <div class="container">
-    <h3>Edit Product</h3>
-    <form method="post">
-      <div class="mb-2"><input class="form-control" name="name" value="{{ p[1] }}" required></div>
-      <div class="mb-2"><input class="form-control" name="packing" value="{{ p[2] or '' }}"></div>
-      <div class="mb-2"><input class="form-control" name="retail" value="{{ p[3] or 0 }}" type="number" step="0.01"></div>
-      <div class="mb-2"><input class="form-control" name="wholesale" value="{{ p[4] or 0 }}" type="number" step="0.01"></div>
-      <div class="mb-2"><input class="form-control" name="barcode" value="{{ p[5] or '' }}"></div>
-      <div class="d-grid"><button class="btn btn-primary">Save Changes</button></div>
-    </form>
-  </div>
-</body>
-</html>
+MANAGE_WORKERS_TEMPLATE = BASE_CSS + NAVBAR_HTML + """
+<h2 style='text-align:center;'>Manage Workers</h2>
+<div style='text-align:center; margin-bottom:10px;'>
+<form method='POST' action='/add_worker'>
+<input type='text' name='username' placeholder='Username' required>
+<input type='password' name='password' placeholder='Password' required>
+<button type='submit'>Add Worker</button>
+</form>
+</div>
+<table>
+<thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Actions</th></tr></thead>
+<tbody>
+{% for w in workers %}
+<tr>
+<td>{{w[0]}}</td><td>{{w[1]}}</td><td>{{w[3]}}</td>
+<td><a href='/delete_worker/{{w[0]}}'>Delete</a></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
 """
 
-MANAGE_WORKERS_TEMPLATE = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Manage Workers</title>
-  {{ base_css|safe }}
-</head>
-<body>
-  {{ navbar|safe }}
-  <div class="container">
-    <h3>Manage Workers</h3>
-    <div class="card mb-3">
-      <div class="card-body">
-        <form method="post" action="{{ url_for('add_worker') }}">
-          <div class="row g-2">
-            <div class="col-md-6"><input class="form-control" name="username" placeholder="Username" required></div>
-            <div class="col-md-6"><input class="form-control" type="password" name="password" placeholder="Password" required></div>
-          </div>
-          <div class="mt-2"><button class="btn btn-success">Add Worker</button></div>
-        </form>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-body">
-        <h5>Existing Workers</h5>
-        <table class="table table-sm">
-          <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Action</th></tr></thead>
-          <tbody>
-            {% for w in workers %}
-            <tr>
-              <td>{{ w[0] }}</td>
-              <td>{{ w[1] }}</td>
-              <td>{{ w[3] }}</td>
-              <td>
-                <a class="btn btn-sm btn-danger" href="{{ url_for('delete_worker', uid=w[0]) }}" onclick="return confirm('Delete worker?')">Delete</a>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
+EDIT_PRODUCT_TEMPLATE = BASE_CSS + NAVBAR_HTML + """
+<h2 style='text-align:center;'>Edit Product</h2>
+<form method='POST' style='text-align:center;'>
+<input type='text' name='name' value='{{p[1]}}' required>
+<input type='text' name='packing' value='{{p[2]}}'>
+<input type='number' step='any' name='retail' value='{{p[3]}}'>
+<input type='number' step='any' name='wholesale' value='{{p[4]}}'>
+<input type='text' name='barcode' value='{{p[5]}}'>
+<button type='submit'>Update</button>
+</form>
 """
 
 # ----------------------
-# Helper
+# Routes
 # ----------------------
-def query_db(query, params=(), fetch=False, commit=False):
-    with sqlite3.connect(DB_NAME) as conn:
-        c = conn.cursor()
-        c.execute(query, params)
-        if commit:
-            conn.commit()
-            return
-        if fetch:
-            return c.fetchall()
-        return c
+@app.before_request
+def require_login():
+    allowed = ['login','static']
+    if request.endpoint not in allowed and 'user_id' not in session:
+        return redirect(url_for('login'))
 
-# ----------------------
-# Auth
-# ----------------------
 @app.route("/login", methods=["GET","POST"])
 def login():
     if request.method=="POST":
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()
-        # admin
-        if username=="Waflora" and password=="0725935410":
-            session['user_id']=0
-            session['role']='admin'
-            session['username']="Waflora"
-            return redirect(url_for('index'))
-        # worker
+        # Check admin hardcoded
         row = query_db("SELECT id,password,role FROM users WHERE username=?", (username,), fetch=True)
         if row:
             uid,pw_hash,role = row[0]
@@ -296,18 +229,12 @@ def login():
                 session['username']=username
                 return redirect(url_for('index'))
         flash("Invalid credentials")
-    return render_template_string(LOGIN_TEMPLATE, base_css=BASE_CSS)
+    return render_template_string(LOGIN_TEMPLATE)
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for('login'))
-
-@app.before_request
-def require_login():
-    allowed = ['login','static']
-    if request.endpoint not in allowed and 'user_id' not in session:
-        return redirect(url_for('login'))
 
 # ----------------------
 # Products
@@ -315,7 +242,7 @@ def require_login():
 @app.route("/")
 def index():
     products = query_db("SELECT * FROM products ORDER BY name ASC", fetch=True)
-    return render_template_string(INDEX_TEMPLATE, products=products, navbar=NAVBAR_HTML, base_css=BASE_CSS)
+    return render_template_string(INDEX_TEMPLATE, products=products)
 
 @app.route("/manage_products")
 def manage_products():
@@ -323,10 +250,8 @@ def manage_products():
         flash("Admin only")
         return redirect(url_for('index'))
     products = query_db("SELECT * FROM products ORDER BY name ASC", fetch=True)
-    return render_template_string(MANAGE_PRODUCTS_TEMPLATE, products=products, navbar=NAVBAR_HTML, base_css=BASE_CSS)
-   # ----------------------
-# Product actions
-# ----------------------
+    return render_template_string(MANAGE_PRODUCTS_TEMPLATE, products=products)
+
 @app.route("/add_product", methods=["POST"])
 def add_product():
     if session.get('role')!='admin':
@@ -338,11 +263,8 @@ def add_product():
     wholesale = request.form.get('wholesale') or 0
     barcode = (request.form.get('barcode') or "").strip()
     if name:
-        query_db(
-            "INSERT INTO products (name,packing,retail_price,wholesale_price,barcode) VALUES (?,?,?,?,?)",
-            (name, packing, retail, wholesale, barcode),
-            commit=True
-        )
+        query_db("INSERT INTO products (name,packing,retail_price,wholesale_price,barcode) VALUES (?,?,?,?,?)",
+                 (name, packing, retail, wholesale, barcode), commit=True)
         flash("Product added")
     return redirect(url_for('manage_products'))
 
@@ -362,14 +284,11 @@ def edit_product(pid):
         retail = request.form.get('retail') or 0
         wholesale = request.form.get('wholesale') or 0
         barcode = (request.form.get('barcode') or "").strip()
-        query_db(
-            "UPDATE products SET name=?, packing=?, retail_price=?, wholesale_price=?, barcode=? WHERE id=?",
-            (name, packing, retail, wholesale, barcode, pid),
-            commit=True
-        )
+        query_db("UPDATE products SET name=?, packing=?, retail_price=?, wholesale_price=?, barcode=? WHERE id=?",
+                 (name, packing, retail, wholesale, barcode, pid), commit=True)
         flash("Product updated")
         return redirect(url_for('manage_products'))
-    return render_template_string(EDIT_PRODUCT_TEMPLATE, p=p, navbar=NAVBAR_HTML, base_css=BASE_CSS)
+    return render_template_string(EDIT_PRODUCT_TEMPLATE, p=p)
 
 @app.route("/delete_product/<int:pid>")
 def delete_product(pid):
@@ -390,7 +309,7 @@ def manage_workers():
         return redirect(url_for('index'))
     rows = query_db("SELECT * FROM users", fetch=True)
     workers = [(r[0], r[1], r[2], r[3] if len(r)>=4 else 'worker') for r in rows]
-    return render_template_string(MANAGE_WORKERS_TEMPLATE, workers=workers, navbar=NAVBAR_HTML, base_css=BASE_CSS)
+    return render_template_string(MANAGE_WORKERS_TEMPLATE, workers=workers)
 
 @app.route("/add_worker", methods=["POST"])
 def add_worker():
@@ -421,7 +340,8 @@ def delete_worker(uid):
     return redirect(url_for('manage_workers'))
 
 # ----------------------
-# Run app
+# Run App
 # ----------------------
 if __name__=="__main__":
-    app.run(debug=True) 
+    init_db()
+    app.run(debug=True)
