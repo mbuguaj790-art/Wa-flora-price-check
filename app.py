@@ -407,7 +407,8 @@ def add_worker():
         return redirect(url_for('manage_workers'))
     pw_hash=generate_password_hash(password)
     try:
-        query_db("INSERT INTO users (username,password,role) VALUES (?,?,?)",(username,pw_hash,'worker'), commit=Trueflash("Worker added")
+        query_db("INSERT INTO users (username,password,role) VALUES (?,?,?)",(username,pw_hash,'worker'), commit=True)
+        flash("Worker added")
     except sqlite3.IntegrityError:
         flash("Username already exists")
     return redirect(url_for('manage_workers'))
@@ -426,4 +427,3 @@ def delete_worker(uid):
 # ----------------------
 if __name__=="__main__":
     app.run(debug=True)
-
