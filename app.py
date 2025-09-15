@@ -438,4 +438,100 @@ def add_worker():
             flash("Worker already exists")
     return redirect(url_for('workers'))
 
-@app.route('/delete
+# ---------------------------- PRODUCT DELETE ----------------------------
+@app.route('/delete/<int:pid>')
+def delete_product(pid):
+    if session.get('role') != 'admin':
+        flash("Only admin can delete products")
+        return redirect(url_for('index'))
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM products WHERE id=?", (pid,))
+        conn.commit()
+    flash("Product deleted")
+    return redirect(url_for('index'))
+
+# ---------------------------- CUSTOMERS ----------------------------
+@app.route('/customers')
+def customers():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM customers")
+        customers = c.fetchall()
+    return render_template_string(CUSTOMERS_TEMPLATE, customers=customers, role=session['role'], username=session['username'])
+
+@app.route('/customers/add', methods=['POST'])
+def add_customer():
+    if session.get('role') != 'admin':
+        flash("Only admin can add customers")
+        return redirect(url_for('customers'))
+    name = request.form['name']
+    location = request.form['location']
+    driver = request.form['driver']
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO customers (name, location, driver, balance) VALUES (?,?,?,0)", (name, location, driver))
+        conn.commit()
+    flash("Customer added")
+    return redirect(url_for('customers'))
+
+@app.route('/customers/delete/<int:cid>')
+def delete_customer(cid):
+    if session.get('role') != 'admin':
+        flash("Only admin can delete customers")
+        return redirect(url_for('customers'))
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM customers WHERE id=?", (cid,))
+        conn.commit()
+    flash("Customer deleted")
+    return redirect(url_for('customers'))
+
+# ---------------------------- SALES ----------------------------
+@app.route('/sales', methods=['GET', 'POST'])
+def sales():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM customers")
+        customers = c.fetchall()
+    if request.method == 'POST':
+        customer_id = request.form['customer_id']
+        total = float(request.form['total'])
+        method = request.form['method']
+        mpesa_name = request.form.get('mpesa_name', '')
+
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute("INSERT INTO sales (customer_id, total, method, mpesa_name) VALUES (?,?,?,?)",
+                      (customer_id, total, method, mpesa_name))
+            # Update customer balance if credit
+            if method == "Credit":
+                c.execute("UPDATE customers SET balance = balance + ? WHERE id=?", (total, customer_id))
+            conn.commit()
+        flash("Sale recorded")
+        return redirect(url_for('sales'))
+
+    return render_template_string(SALES_TEMPLATE, customers=customers, role=session['role'], username=session['username'])
+
+# ---------------------------- PAYMENTS ----------------------------
+@app.route('/payments', methods=['POST'])
+def payments():
+    if session.get('role') != 'admin':
+        flash("Only admin can record payments")
+        return redirect(url_for('customers'))
+    customer_id = request.form['customer_id']
+    amount = float(request.form['amount'])
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE customers SET balance = balance - ? WHERE id=?", (amount, customer_id))
+        conn.commit()
+    flash("Payment recorded")
+    return redirect(url_for('customers'))
+
+# ---------------------------- RUN APP ----------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
